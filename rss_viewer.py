@@ -54,6 +54,7 @@ MAX_WS_CONNECTIONS: int = 100
 MAX_LIMIT: int = 100
 MAX_FEED_SIZE: int = 5 * 1024 * 1024
 DEFAULT_REFRESH: int = 300
+ADMIN_TOKEN: str = os.environ.get("ADMIN_TOKEN", "markstackai2026")
 
 # ---------------------------------------------------------------------------
 # RSS Sources (category -> URLs)
@@ -797,13 +798,39 @@ async def api_health(request: Request) -> JSONResponse:
     })
 
 
+def _check_admin(request: Request) -> bool:
+    """Verify admin token from Authorization header."""
+    auth = request.headers.get("authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[7:] == ADMIN_TOKEN
+    return False
+
+
+async def api_admin_login(request: Request) -> JSONResponse:
+    """Admin login — verify password and return token."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    password = (body.get("password") or "").strip()
+    if not password:
+        return JSONResponse({"error": "Password required"}, status_code=400)
+    if password != ADMIN_TOKEN:
+        return JSONResponse({"error": "Wrong password"}, status_code=401)
+    return JSONResponse({"ok": True, "token": ADMIN_TOKEN})
+
+
 async def api_feeds(request: Request) -> JSONResponse:
     """List all feeds or add a new feed."""
     db: ArticleDB = request.app.state.db
     if request.method == "GET":
+        if not _check_admin(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
         feeds = db.get_feeds()
         return JSONResponse({"feeds": feeds})
     elif request.method == "POST":
+        if not _check_admin(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
         try:
             body = await request.json()
         except Exception:
@@ -823,6 +850,8 @@ async def api_feeds(request: Request) -> JSONResponse:
 
 async def api_feed_action(request: Request) -> JSONResponse:
     """Delete or toggle a feed by id."""
+    if not _check_admin(request):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
     db: ArticleDB = request.app.state.db
     feed_id = _safe_int(request.path_params.get("id"), 0, 0, 999999999)
     if feed_id == 0:
@@ -910,6 +939,7 @@ def create_app(db_path: str = "data/rss_news.db") -> Starlette:
             Route("/api/articles", api_articles),
             Route("/api/stats", api_stats),
             Route("/api/filters", api_filters),
+            Route("/api/admin/login", api_admin_login, methods=["POST"]),
             Route("/api/feeds", api_feeds, methods=["GET", "POST"]),
             Route("/api/feeds/{id:int}", api_feed_action, methods=["DELETE", "PUT"]),
             Route("/health", api_health),
@@ -1498,17 +1528,31 @@ button { cursor: pointer; font-family: inherit; }
 <div class="modal-overlay" id="feedModal" role="dialog" aria-label="Feed management" aria-modal="true">
   <div class="modal feed-modal">
     <button class="modal-close" id="feedModalClose" aria-label="Close">&times;</button>
-    <h2 id="feedModalTitle">Manage RSS Feeds</h2>
-    <div class="feed-add-form">
-      <input type="text" id="feedUrlInput" placeholder="https://example.com/rss.xml" class="feed-input" aria-label="Feed URL">
-      <input type="text" id="feedCatInput" placeholder="Category" class="feed-input feed-cat-input" aria-label="Category">
-      <button class="feed-add-btn" id="feedAddBtn">+ Add</button>
+    <!-- Login panel -->
+    <div id="feedLoginPanel">
+      <h2>Admin Login</h2>
+      <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">Enter admin password to manage feeds<br>输入管理员密码以管理数据源</p>
+      <div class="feed-add-form">
+        <input type="password" id="adminPwdInput" placeholder="Password" class="feed-input" style="flex:1" aria-label="Admin password">
+        <button class="feed-add-btn" id="adminLoginBtn">Login</button>
+      </div>
+      <div id="loginError" style="color:var(--accent-red,#f85149);font-size:12px;margin-top:8px;display:none;"></div>
     </div>
-    <div class="feed-filter-row">
-      <input type="text" id="feedSearchInput" placeholder="Search feeds..." class="feed-input feed-search" aria-label="Search feeds">
-      <span class="feed-count" id="feedCount">0 feeds</span>
+    <!-- Feed management panel (hidden until login) -->
+    <div id="feedMgrPanel" style="display:none;">
+      <h2 id="feedModalTitle">Manage RSS Feeds</h2>
+      <div class="feed-add-form">
+        <input type="text" id="feedUrlInput" placeholder="https://example.com/rss.xml" class="feed-input" aria-label="Feed URL">
+        <input type="text" id="feedCatInput" placeholder="Category" class="feed-input feed-cat-input" aria-label="Category">
+        <button class="feed-add-btn" id="feedAddBtn">+ Add</button>
+      </div>
+      <div class="feed-filter-row">
+        <input type="text" id="feedSearchInput" placeholder="Search feeds..." class="feed-input feed-search" aria-label="Search feeds">
+        <span class="feed-count" id="feedCount">0 feeds</span>
+        <button class="feed-item-btn" id="adminLogoutBtn" title="Logout" style="font-size:12px;padding:4px 8px;">Logout</button>
+      </div>
+      <div class="feed-list" id="feedList"></div>
     </div>
-    <div class="feed-list" id="feedList"></div>
   </div>
 </div>
 
@@ -2193,13 +2237,57 @@ function highlightCard(cards) {
   }
 }
 
-/* ===== Feed Manager ===== */
+/* ===== Feed Manager (with admin auth) ===== */
 let feedData = [];
 const feedModal = $('feedModal');
+let adminToken = sessionStorage.getItem('ni_admin_token') || '';
+
+function authHeaders() {
+  return { 'Authorization': 'Bearer ' + adminToken, 'Content-Type': 'application/json' };
+}
+
+function showFeedPanel(loggedIn) {
+  $('feedLoginPanel').style.display = loggedIn ? 'none' : 'block';
+  $('feedMgrPanel').style.display = loggedIn ? 'block' : 'none';
+  $('loginError').style.display = 'none';
+}
+
+async function adminLogin() {
+  const pwd = $('adminPwdInput').value.trim();
+  if (!pwd) return;
+  try {
+    const r = await fetch('/api/admin/login', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({password: pwd})
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      $('loginError').textContent = data.error || 'Login failed';
+      $('loginError').style.display = 'block';
+      return;
+    }
+    adminToken = data.token;
+    sessionStorage.setItem('ni_admin_token', adminToken);
+    showFeedPanel(true);
+    loadFeeds();
+  } catch (e) {
+    $('loginError').textContent = 'Network error';
+    $('loginError').style.display = 'block';
+  }
+}
+
+function adminLogout() {
+  adminToken = '';
+  sessionStorage.removeItem('ni_admin_token');
+  $('adminPwdInput').value = '';
+  showFeedPanel(false);
+}
 
 async function loadFeeds() {
   try {
-    const res = await apiFetch('/api/feeds');
+    const r = await fetch('/api/feeds', { headers: authHeaders() });
+    if (r.status === 401) { adminLogout(); return; }
+    const res = await r.json();
     feedData = res.feeds || [];
     renderFeeds();
   } catch (e) { showError('Failed to load feeds: ' + e.message); }
@@ -2234,10 +2322,11 @@ async function addFeed() {
   if (!url) return;
   try {
     const r = await fetch('/api/feeds', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
+      method: 'POST', headers: authHeaders(),
       body: JSON.stringify({url, category: cat})
     });
     const data = await r.json();
+    if (r.status === 401) { adminLogout(); return; }
     if (!r.ok) { showError(data.error || 'Failed'); return; }
     $('feedUrlInput').value = '';
     $('feedCatInput').value = '';
@@ -2248,15 +2337,23 @@ async function addFeed() {
 async function feedAction(action, id) {
   try {
     const method = action === 'delete' ? 'DELETE' : 'PUT';
-    const r = await fetch('/api/feeds/' + id, {method});
+    const r = await fetch('/api/feeds/' + id, { method, headers: authHeaders() });
+    if (r.status === 401) { adminLogout(); return; }
     if (!r.ok) { const d = await r.json(); showError(d.error || 'Failed'); return; }
     loadFeeds();
   } catch (e) { showError('Failed: ' + e.message); }
 }
 
-$('feedMgrBtn').addEventListener('click', () => { feedModal.classList.add('show'); loadFeeds(); });
+$('feedMgrBtn').addEventListener('click', () => {
+  feedModal.classList.add('show');
+  if (adminToken) { showFeedPanel(true); loadFeeds(); }
+  else { showFeedPanel(false); setTimeout(() => $('adminPwdInput').focus(), 100); }
+});
 $('feedModalClose').addEventListener('click', () => { feedModal.classList.remove('show'); });
 feedModal.addEventListener('click', (e) => { if (e.target === feedModal) feedModal.classList.remove('show'); });
+$('adminLoginBtn').addEventListener('click', adminLogin);
+$('adminPwdInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') adminLogin(); });
+$('adminLogoutBtn').addEventListener('click', adminLogout);
 $('feedAddBtn').addEventListener('click', addFeed);
 $('feedUrlInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') addFeed(); });
 $('feedSearchInput').addEventListener('input', renderFeeds);
