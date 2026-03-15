@@ -941,6 +941,30 @@ class SecurityHeadersMiddleware:
 # Application Factory
 # ---------------------------------------------------------------------------
 
+async def serve_favicon(request: Request) -> Any:
+    """Serve favicon.ico."""
+    from starlette.responses import Response
+    base = os.path.dirname(os.path.abspath(__file__))
+    filepath = os.path.join(base, "favicon.ico")
+    if not os.path.isfile(filepath):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    with open(filepath, "rb") as f:
+        return Response(content=f.read(), media_type="image/x-icon",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
+async def serve_logo(request: Request) -> Any:
+    """Serve logo.png."""
+    from starlette.responses import Response
+    base = os.path.dirname(os.path.abspath(__file__))
+    filepath = os.path.join(base, "logo.png")
+    if not os.path.isfile(filepath):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    with open(filepath, "rb") as f:
+        return Response(content=f.read(), media_type="image/png",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
 def create_app(db_path: str = "data/rss_news.db") -> Starlette:
     """Create the Starlette application with all middleware."""
     db = ArticleDB(db_path)
@@ -963,6 +987,8 @@ def create_app(db_path: str = "data/rss_news.db") -> Starlette:
             Route("/api/feeds", api_feeds, methods=["GET", "POST"]),
             Route("/api/feeds/{id:int}", api_feed_action, methods=["DELETE", "PUT"]),
             Route("/health", api_health),
+            Route("/favicon.ico", serve_favicon),
+            Route("/logo.png", serve_logo),
             WebSocketRoute("/ws", ws_endpoint),
         ],
         on_startup=[on_startup],
@@ -985,6 +1011,8 @@ HTML_PAGE = r"""
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>News Intelligence Dashboard</title>
+<link rel="icon" href="/favicon.ico" type="image/x-icon">
+<link rel="apple-touch-icon" href="/logo.png">
 <style>
 :root {
   --bg-primary: #0d1117;
