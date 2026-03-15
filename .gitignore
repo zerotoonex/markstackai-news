@@ -5,3 +5,4 @@ data/
 logs/
 *.pid
 .DS_Store
+.env

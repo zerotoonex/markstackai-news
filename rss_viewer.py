@@ -28,6 +28,26 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
+def _load_dotenv(path: str = ".env") -> None:
+    """Load .env file into os.environ (no extra dependency needed)."""
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), path)
+    if not os.path.isfile(env_path):
+        return
+    with open(env_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip("'\"")
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+_load_dotenv()
+
 import feedparser
 from starlette.applications import Starlette
 from starlette.middleware.gzip import GZipMiddleware
@@ -2409,10 +2429,13 @@ init();
 def main() -> None:
     """Run the News Intelligence web server."""
     parser = argparse.ArgumentParser(description="News Intelligence")
-    parser.add_argument("--port", type=int, default=37378)
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "37378")))
     parser.add_argument("--host", type=str, default="0.0.0.0")
-    parser.add_argument("--db", type=str, default="data/rss_news.db")
+    parser.add_argument("--db", type=str, default=os.environ.get("DB_PATH", "data/rss_news.db"))
     args = parser.parse_args()
+
+    global DEFAULT_REFRESH
+    DEFAULT_REFRESH = int(os.environ.get("REFRESH_INTERVAL", str(DEFAULT_REFRESH)))
 
     app = create_app(args.db)
     logger.info("News Intelligence starting on http://%s:%d", args.host, args.port)

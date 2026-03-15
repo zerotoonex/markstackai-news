@@ -123,20 +123,28 @@ Changes take effect on the next refresh cycle (every 5 minutes).
 
 Default password / 默认密码: `admin@2026`
 
-Customize via environment variable / 通过环境变量自定义：
+Customize via `.env` file (recommended) or environment variable:
+
+通过 `.env` 文件（推荐）或环境变量自定义：
 
 ```bash
-# Set custom admin password / 设置自定义管理员密码
-ADMIN_TOKEN=your_secure_password python rss_viewer.py
-
-# Or export before running / 或提前导出
-export ADMIN_TOKEN=your_secure_password
-python rss_viewer.py
+# Copy the example and edit / 复制示例并编辑
+cp .env.example .env
+nano .env
 ```
 
-> **Security Tip / 安全提示**: It is strongly recommended to change the default password in production environments.
+`.env` file supports / `.env` 文件支持:
+
+```env
+ADMIN_TOKEN=your_secure_password   # Admin password / 管理员密码
+PORT=37378                         # Server port / 服务端口
+DB_PATH=data/rss_news.db           # Database path / 数据库路径
+REFRESH_INTERVAL=300               # RSS refresh interval in seconds / 刷新间隔（秒）
+```
+
+> **Security Tip / 安全提示**: It is strongly recommended to change the default password in production. The `.env` file is excluded from git by default.
 >
-> 强烈建议在生产环境中修改默认密码。
+> 强烈建议在生产环境中修改默认密码。`.env` 文件默认不会被提交到 git。
 
 ---
 
