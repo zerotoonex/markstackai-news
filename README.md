@@ -12,7 +12,13 @@
 
 ## Preview / 预览
 
-🌐 **Live Demo / 在线演示**: [http://74.48.24.131:37378](http://74.48.24.131:37378)
+**Dark Theme / 深色主题**
+
+![Dark Theme](screenshots/dark-theme.jpg)
+
+**Light Theme / 浅色主题**
+
+![Light Theme](screenshots/light-theme.jpg)
 
 ---
 
