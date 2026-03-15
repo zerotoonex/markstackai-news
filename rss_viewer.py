@@ -14,19 +14,24 @@ Features:
 
 import argparse
 import asyncio
+import hashlib
 import html as html_mod
+import ipaddress
 import json
 import logging
 import os
 import re
+import secrets
 import sqlite3
 import threading
 import time
 import urllib.error
 import urllib.request
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 def _load_dotenv(path: str = ".env") -> None:
     """Load .env file into os.environ (no extra dependency needed)."""
@@ -74,7 +79,13 @@ MAX_WS_CONNECTIONS: int = 100
 MAX_LIMIT: int = 100
 MAX_FEED_SIZE: int = 5 * 1024 * 1024
 DEFAULT_REFRESH: int = 300
-ADMIN_TOKEN: str = os.environ.get("ADMIN_TOKEN", "admin@2026")
+ADMIN_TOKEN: str = os.environ.get("ADMIN_TOKEN", "")
+if not ADMIN_TOKEN:
+    ADMIN_TOKEN = secrets.token_urlsafe(32)
+    logger.warning("ADMIN_TOKEN not set! Generated random token: %s — set ADMIN_TOKEN in .env", ADMIN_TOKEN)
+MAX_WS_PER_IP: int = 5
+MAX_QUERY_LEN: int = 200
+MAX_SOURCE_PARAM_LEN: int = 2000
 
 # ---------------------------------------------------------------------------
 # RSS Sources (category -> URLs)
@@ -552,6 +563,7 @@ class RSSStore:
         self._ws_clients: set[WebSocket] = set()
         self._ws_lock = asyncio.Lock()
         self._ws_count: int = 0
+        self._ws_ip_counts: dict[str, int] = {}
         self._executor = ThreadPoolExecutor(max_workers=20, thread_name_prefix="rss")
         self._etag_cache: dict[str, tuple[str, str]] = {}
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -572,19 +584,30 @@ class RSSStore:
         """Current WebSocket connection count."""
         return self._ws_count
 
-    async def register_ws(self, ws: WebSocket) -> bool:
+    async def register_ws(self, ws: WebSocket, ip_key: str = "") -> bool:
         """Register a WebSocket client. Returns False if limit reached."""
         async with self._ws_lock:
             if self._ws_count >= MAX_WS_CONNECTIONS:
                 return False
+            if ip_key:
+                ip_count = self._ws_ip_counts.get(ip_key, 0)
+                if ip_count >= MAX_WS_PER_IP:
+                    return False
+                self._ws_ip_counts[ip_key] = ip_count + 1
             self._ws_clients.add(ws)
             self._ws_count = len(self._ws_clients)
         return True
 
-    async def unregister_ws(self, ws: WebSocket) -> None:
+    async def unregister_ws(self, ws: WebSocket, ip_key: str = "") -> None:
         """Unregister a WebSocket client."""
         async with self._ws_lock:
             self._ws_clients.discard(ws)
+            if ip_key:
+                count = self._ws_ip_counts.get(ip_key, 1)
+                if count <= 1:
+                    self._ws_ip_counts.pop(ip_key, None)
+                else:
+                    self._ws_ip_counts[ip_key] = count - 1
             self._ws_count = len(self._ws_clients)
 
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -769,6 +792,12 @@ async def api_articles(request: Request) -> JSONResponse:
     """Query articles with multi-dimensional filters."""
     db: ArticleDB = request.app.state.db
     params = request.query_params
+    q = params.get("q", "")
+    sources = params.get("sources", "")
+    if len(q) > MAX_QUERY_LEN:
+        return JSONResponse({"error": f"Search query too long (max {MAX_QUERY_LEN})"}, status_code=400)
+    if len(sources) > MAX_SOURCE_PARAM_LEN:
+        return JSONResponse({"error": "Sources parameter too long"}, status_code=400)
     articles, total = db.query_articles(
         category=params.get("category", ""),
         region=params.get("region", ""),
@@ -819,15 +848,67 @@ async def api_health(request: Request) -> JSONResponse:
 
 
 def _check_admin(request: Request) -> bool:
-    """Verify admin token from Authorization header."""
+    """Verify admin token from Authorization header (timing-safe)."""
     auth = request.headers.get("authorization", "")
     if auth.startswith("Bearer "):
-        return auth[7:] == ADMIN_TOKEN
+        return secrets.compare_digest(auth[7:], ADMIN_TOKEN)
     return False
 
 
+class _RateLimiter:
+    """In-memory rate limiter using sliding window."""
+
+    def __init__(self, max_attempts: int = 5, window_seconds: int = 300) -> None:
+        self._max = max_attempts
+        self._window = window_seconds
+        self._attempts: dict[str, list[float]] = defaultdict(list)
+        self._lock = threading.Lock()
+
+    def is_limited(self, key: str) -> bool:
+        """Check if key exceeded rate limit. Records the attempt."""
+        now = time.time()
+        with self._lock:
+            cutoff = now - self._window
+            self._attempts[key] = [t for t in self._attempts[key] if t > cutoff]
+            if len(self._attempts[key]) >= self._max:
+                return True
+            self._attempts[key].append(now)
+            return False
+
+
+_login_limiter = _RateLimiter(max_attempts=5, window_seconds=300)
+
+
+def _is_safe_url(url: str) -> bool:
+    """Validate URL does not point to private/internal networks (SSRF protection)."""
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+        if hostname in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+            return False
+        try:
+            ip = ipaddress.ip_address(hostname)
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                return False
+        except ValueError:
+            if hostname.endswith((".local", ".internal")):
+                return False
+        if hostname in ("169.254.169.254", "metadata.google.internal"):
+            return False
+        return True
+    except Exception:
+        return False
+
+
 async def api_admin_login(request: Request) -> JSONResponse:
-    """Admin login — verify password and return token."""
+    """Admin login — verify password with rate limiting."""
+    client_ip = request.client.host if request.client else "unknown"
+    ip_key = hashlib.sha256(client_ip.encode()).hexdigest()[:16]
+    if _login_limiter.is_limited(ip_key):
+        logger.warning("Login rate limited for IP hash %s", ip_key)
+        return JSONResponse({"error": "Too many login attempts. Try again later."}, status_code=429)
     try:
         body = await request.json()
     except Exception:
@@ -835,9 +916,10 @@ async def api_admin_login(request: Request) -> JSONResponse:
     password = (body.get("password") or "").strip()
     if not password:
         return JSONResponse({"error": "Password required"}, status_code=400)
-    if password != ADMIN_TOKEN:
+    if not secrets.compare_digest(password, ADMIN_TOKEN):
+        logger.info("Failed login attempt from IP hash %s", ip_key)
         return JSONResponse({"error": "Wrong password"}, status_code=401)
-    return JSONResponse({"ok": True, "token": ADMIN_TOKEN})
+    return JSONResponse({"ok": True})
 
 
 async def api_feeds(request: Request) -> JSONResponse:
@@ -861,6 +943,12 @@ async def api_feeds(request: Request) -> JSONResponse:
             return JSONResponse({"error": "URL is required"}, status_code=400)
         if not url.startswith(("http://", "https://")):
             return JSONResponse({"error": "Invalid URL"}, status_code=400)
+        if not _is_safe_url(url):
+            return JSONResponse({"error": "URL points to internal/private network"}, status_code=400)
+        if len(url) > 2048:
+            return JSONResponse({"error": "URL too long (max 2048)"}, status_code=400)
+        if len(category) > 50:
+            return JSONResponse({"error": "Category too long (max 50)"}, status_code=400)
         feed_id = db.add_feed(url, category)
         if feed_id is None:
             return JSONResponse({"error": "Feed already exists"}, status_code=409)
@@ -890,10 +978,12 @@ async def api_feed_action(request: Request) -> JSONResponse:
 
 
 async def ws_endpoint(websocket: WebSocket) -> None:
-    """WebSocket endpoint for live updates with connection limiting."""
+    """WebSocket endpoint for live updates with per-IP connection limiting."""
     store: RSSStore = websocket.app.state.store
+    client_ip = websocket.client.host if websocket.client else "unknown"
+    ip_key = hashlib.sha256(client_ip.encode()).hexdigest()[:16]
     await websocket.accept()
-    accepted = await store.register_ws(websocket)
+    accepted = await store.register_ws(websocket, ip_key)
     if not accepted:
         await websocket.send_json({"type": "error", "message": "Too many connections"})
         await websocket.close(code=1013)
@@ -906,7 +996,7 @@ async def ws_endpoint(websocket: WebSocket) -> None:
     except Exception:
         logger.debug("WebSocket error", exc_info=True)
     finally:
-        await store.unregister_ws(websocket)
+        await store.unregister_ws(websocket, ip_key)
 
 
 # ---------------------------------------------------------------------------
@@ -929,6 +1019,11 @@ class SecurityHeadersMiddleware:
                         (b"x-xss-protection", b"1; mode=block"),
                         (b"referrer-policy", b"strict-origin-when-cross-origin"),
                         (b"permissions-policy", b"camera=(), microphone=(), geolocation=()"),
+                        (b"content-security-policy",
+                         b"default-src 'self'; script-src 'self' 'unsafe-inline'; "
+                         b"style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+                         b"connect-src 'self' ws: wss:; frame-ancestors 'none'; "
+                         b"form-action 'self'; base-uri 'self'"),
                     ]
                     message["headers"] = list(message.get("headers", [])) + extra
                 await send(message)
@@ -2314,7 +2409,7 @@ async function adminLogin() {
       $('loginError').style.display = 'block';
       return;
     }
-    adminToken = data.token;
+    adminToken = pwd;
     sessionStorage.setItem('ni_admin_token', adminToken);
     showFeedPanel(true);
     loadFeeds();
