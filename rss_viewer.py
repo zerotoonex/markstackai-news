@@ -54,7 +54,7 @@ MAX_WS_CONNECTIONS: int = 100
 MAX_LIMIT: int = 100
 MAX_FEED_SIZE: int = 5 * 1024 * 1024
 DEFAULT_REFRESH: int = 300
-ADMIN_TOKEN: str = os.environ.get("ADMIN_TOKEN", "markstackai2026")
+ADMIN_TOKEN: str = os.environ.get("ADMIN_TOKEN", "admin@2026")
 
 # ---------------------------------------------------------------------------
 # RSS Sources (category -> URLs)

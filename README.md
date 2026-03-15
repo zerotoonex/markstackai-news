@@ -121,7 +121,7 @@ Changes take effect on the next refresh cycle (every 5 minutes).
 
 ### Admin Password / 管理员密码
 
-Default password / 默认密码: `markstackai2026`
+Default password / 默认密码: `admin@2026`
 
 Customize via environment variable / 通过环境变量自定义：
 
