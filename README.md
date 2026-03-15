@@ -106,18 +106,37 @@ sudo bash deploy.sh            # Interactive menu / 交互式菜单
 
 ## Feed Management / 数据源管理
 
-Click the **gear icon** (⚙) in the top-right corner to manage RSS feeds:
+Feed management requires **admin login**. Click the **gear icon** (⚙) in the top-right corner, enter the admin password to access the management panel.
 
-点击右上角 **齿轮图标**（⚙）管理 RSS 数据源：
+数据源管理需要**管理员登录**。点击右上角 **齿轮图标**（⚙），输入管理员密码后进入管理面板。
 
-- **Add** — Enter RSS URL and category, click `+ Add`
-- **Search** — Filter existing feeds by URL or category
-- **Enable/Disable** — Toggle feeds on/off without deleting
-- **Delete** — Remove feeds permanently
+- **Add** — Enter RSS URL and category, click `+ Add` / 输入 RSS URL 和分类，点击 `+ Add` 添加
+- **Search** — Filter existing feeds by URL or category / 按 URL 或分类搜索已有源
+- **Enable/Disable** — Toggle feeds on/off without deleting / 启用/禁用源，无需删除
+- **Delete** — Remove feeds permanently / 永久删除源
 
 Changes take effect on the next refresh cycle (every 5 minutes).
 
 修改在下一个刷新周期（每 5 分钟）自动生效。
+
+### Admin Password / 管理员密码
+
+Default password / 默认密码: `markstackai2026`
+
+Customize via environment variable / 通过环境变量自定义：
+
+```bash
+# Set custom admin password / 设置自定义管理员密码
+ADMIN_TOKEN=your_secure_password python rss_viewer.py
+
+# Or export before running / 或提前导出
+export ADMIN_TOKEN=your_secure_password
+python rss_viewer.py
+```
+
+> **Security Tip / 安全提示**: It is strongly recommended to change the default password in production environments.
+>
+> 强烈建议在生产环境中修改默认密码。
 
 ---
 
